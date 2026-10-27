@@ -1,0 +1,52 @@
+name: bliss-live
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: "Bliss ISO direct link"
+        required: true
+      vnc_password:
+        description: "VNC password (max 8 chars)"
+        default: "pass1234"
+      runtime:
+        description: "Minutes (max 330)"
+        default: "120"
+jobs:
+  vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils socat curl
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update && sudo apt-get install -y ngrok
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - name: Download ISO
+        run: curl -L -o bliss.iso "${{ inputs.iso_url }}" && ls -lh bliss.iso
+      - name: Boot VM
+        run: |
+          qemu-img create -f qcow2 disk.qcow2 32G
+          nohup qemu-system-x86_64 -enable-kvm -cpu host -m 4096 -smp 2 \
+            -cdrom bliss.iso -boot d \
+            -drive file=disk.qcow2,if=virtio \
+            -vga std -device qemu-xhci -device usb-tablet \
+            -vnc :0,password=on \
+            -monitor unix:/tmp/mon,server,nowait \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            > qemu.log 2>&1 &
+          sleep 5
+          echo "change vnc password ${{ inputs.vnc_password }}" | socat - UNIX-CONNECT:/tmp/mon
+      - name: Ngrok tunnel
+        env:
+          NGROK_AUTH: ${{ secrets.NGROK_AUTH }}
+        run: |
+          ngrok config add-authtoken "$NGROK_AUTH"
+          nohup ngrok tcp 5900 > ngrok.log 2>&1 &
+          sleep 10
+          curl -s localhost:4040/api/tunnels | grep -o 'tcp://[^"]*'
+      - name: Keep alive
+        run: sleep $(( ${{ inputs.runtime }} * 60 ))
